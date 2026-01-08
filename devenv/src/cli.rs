@@ -76,6 +76,12 @@ pub enum Commands {
 
         #[arg(short, long, help = "Start processes in the background.")]
         detach: bool,
+
+        #[arg(
+            long,
+            help = "Error if a port is already in use instead of auto-allocating the next available port."
+        )]
+        strict_ports: bool,
     },
 
     Processes {
@@ -176,6 +182,12 @@ pub enum ProcessesCommand {
 
         #[arg(short, long, help = "Start processes in the background.")]
         detach: bool,
+
+        #[arg(
+            long,
+            help = "Error if a port is already in use instead of auto-allocating the next available port."
+        )]
+        strict_ports: bool,
     },
 
     #[command(alias = "stop", about = "Stop processes running in the background.")]
