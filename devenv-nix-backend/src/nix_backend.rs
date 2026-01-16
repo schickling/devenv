@@ -16,6 +16,7 @@ use tokio_shutdown::Shutdown;
 use devenv_activity::{Activity, ActivityInstrument, ActivityLevel, current_activity_id};
 use devenv_cache_core::compute_string_hash;
 use devenv_core::GlobalOptions;
+use devenv_core::PortAllocator;
 use devenv_core::cachix::{CachixCacheInfo, CachixConfig, CachixManager};
 use devenv_core::config::Config;
 use devenv_core::nix_args::NixArgs;
@@ -141,6 +142,11 @@ pub struct NixRustBackend {
     // Shutdown coordinator - stored so we can trigger shutdown in Drop
     // This ensures cleanup tasks are signaled to exit when the backend is dropped
     shutdown: Arc<Shutdown>,
+
+    // Port allocator for managing automatic port allocation during evaluation
+    // Shared with eval cache for resource replay on cache hits
+    #[allow(dead_code)]
+    port_allocator: Arc<PortAllocator>,
 }
 
 // SAFETY: This is unsafe and relies on several assumptions about the Nix C++ library:
@@ -225,6 +231,7 @@ impl NixRustBackend {
     /// * `shutdown` - Shutdown coordinator for graceful cleanup of cachix daemon
     /// * `eval_cache_pool` - Optional eval cache database pool from framework layer
     /// * `store` - Optional custom Nix store path (for testing with restricted permissions)
+    /// * `port_allocator` - Port allocator for managing automatic port allocation during evaluation
     pub fn new(
         paths: DevenvPaths,
         config: Config,
@@ -233,6 +240,7 @@ impl NixRustBackend {
         shutdown: Arc<Shutdown>,
         eval_cache_pool: Option<Arc<tokio::sync::OnceCell<sqlx::SqlitePool>>>,
         store: Option<std::path::PathBuf>,
+        port_allocator: Arc<PortAllocator>,
     ) -> Result<Self> {
         // Initialize Nix libexpr - uses Once internally so safe to call multiple times.
         // This may already have been called by worker threads via gc_register_current_thread().
@@ -432,6 +440,7 @@ impl NixRustBackend {
             _gc_guard: GcCollectionGuard,
             _gc_registration: gc_registration,
             shutdown: shutdown.clone(),
+            port_allocator,
         };
 
         Ok(backend)
