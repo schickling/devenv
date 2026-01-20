@@ -815,6 +815,8 @@ impl ActivityModel {
         self.add_log_message(msg.clone());
 
         // Only create activity for messages with a parent
+        // Standalone errors are logged but not shown as activities - the failed build
+        // activities themselves will remain visible with their logs
         if msg.parent.is_some() {
             let id = msg.id;
             let level = msg.level;
@@ -1091,10 +1093,15 @@ impl ActivityModel {
             return (all_children, total_count, 0);
         }
 
-        // Partition into active (including queued) and completed
-        let (active, completed): (Vec<_>, Vec<_>) = all_children
+        // Partition into active (including queued), failed, and completed successfully
+        let (active, rest): (Vec<_>, Vec<_>) = all_children
             .into_iter()
             .partition(|a| matches!(a.state, NixActivityState::Queued | NixActivityState::Active));
+
+        // Separate failed from successful completions - failed always stay visible
+        let (failed, completed): (Vec<_>, Vec<_>) = rest
+            .into_iter()
+            .partition(|a| matches!(a.state, NixActivityState::Completed { success: false, .. }));
 
         // Sort completed by completion time (most recent first)
         let mut completed_with_time: Vec<_> = completed
@@ -1114,7 +1121,7 @@ impl ActivityModel {
                     now.duration_since(*completed_at) < limit.linger_duration
                 });
 
-        // Build result: prioritize active, then lingering, then older
+        // Build result: prioritize active, then failed (always visible), then lingering, then older
         let mut result: Vec<&Activity> = Vec::new();
 
         // Add all active items first (they always show)
@@ -1122,6 +1129,11 @@ impl ActivityModel {
             if result.len() >= limit.max_lines {
                 break;
             }
+            result.push(a);
+        }
+
+        // Add all failed items (they always show, no limit)
+        for a in &failed {
             result.push(a);
         }
 

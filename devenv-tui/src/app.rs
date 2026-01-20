@@ -197,6 +197,21 @@ impl TuiApp {
                     if has_errors && !is_interrupt {
                         // Errors occurred - enter paused mode instead of exiting
                         error_paused = true;
+
+                        // Clear the previous render before showing paused state
+                        if let (Ok(ui), Ok(model_guard)) = (ui_state.read(), activity_model.read()) {
+                            let lines_to_clear = model_guard
+                                .calculate_rendered_height(ui.selected_activity, ui.terminal_size.height);
+                            if lines_to_clear > 0 {
+                                let mut stdout = io::stdout();
+                                let _ = execute!(
+                                    stdout,
+                                    cursor::MoveToPreviousLine(lines_to_clear),
+                                    terminal::Clear(terminal::ClearType::FromCursorDown)
+                                );
+                            }
+                        }
+
                         if let Ok(mut ui) = ui_state.write() {
                             ui.view_mode = ViewMode::ErrorPaused;
                         }
@@ -213,7 +228,12 @@ impl TuiApp {
                     shutdown.clone(),
                     config.clone(),
                     &mut pre_expand_height,
-                ) => { }
+                ) => {
+                    // run_view returned - in error_paused mode this means user pressed exit key
+                    if error_paused {
+                        break;
+                    }
+                }
             }
         }
 
@@ -222,52 +242,49 @@ impl TuiApp {
         //
         // On interrupt (Ctrl+C): clear the output so the user sees a clean terminal
         // On normal completion: clear previous render, then render final state
-        {
-            let ui = ui_state.read().unwrap();
-            if let Ok(model_guard) = activity_model.read() {
-                // Clear the previous inline render output
-                let lines_to_clear = model_guard
-                    .calculate_rendered_height(ui.selected_activity, ui.terminal_size.height);
+        if let (Ok(ui), Ok(model_guard)) = (ui_state.read(), activity_model.read()) {
+            // Clear the previous inline render output
+            let lines_to_clear = model_guard
+                .calculate_rendered_height(ui.selected_activity, ui.terminal_size.height);
 
-                if lines_to_clear > 0 {
-                    let mut stdout = io::stdout();
-                    let _ = execute!(
-                        stdout,
-                        cursor::MoveToPreviousLine(lines_to_clear),
-                        terminal::Clear(terminal::ClearType::FromCursorDown)
-                    );
-                }
+            if lines_to_clear > 0 {
+                let mut stdout = io::stdout();
+                let _ = execute!(
+                    stdout,
+                    cursor::MoveToPreviousLine(lines_to_clear),
+                    terminal::Clear(terminal::ClearType::FromCursorDown)
+                );
+            }
 
-                // On interrupt, don't render final state (user wants to exit quickly)
-                // On normal completion, render the final state with all events processed
-                if shutdown.last_signal().is_none() {
-                    // Collect ALL errors for printing after TUI (including nested ones)
-                    let all_errors: Vec<_> = model_guard
-                        .get_all_error_messages()
-                        .into_iter()
-                        .map(|m| (m.text.clone(), m.details.clone()))
-                        .collect();
+            // On interrupt, don't render final state (user wants to exit quickly)
+            // On normal completion, render the final state with all events processed
+            if shutdown.last_signal().is_none() {
+                // Collect ALL errors for printing after TUI (including nested ones)
+                let all_errors: Vec<_> = model_guard
+                    .get_all_error_messages()
+                    .into_iter()
+                    .map(|m| (m.text.clone(), m.details.clone()))
+                    .collect();
 
-                    let (terminal_width, _) = crossterm::terminal::size().unwrap_or((80, 24));
-                    let mut element = element! {
-                        View(width: terminal_width) {
-                            #(vec![view(&model_guard, &ui).into()])
+                let (terminal_width, _) = crossterm::terminal::size().unwrap_or((80, 24));
+                let mut element = element! {
+                    View(width: terminal_width) {
+                        #(vec![view(&model_guard, &ui).into()])
+                    }
+                };
+                element.print();
+
+                // Print full error messages in red (not truncated by TUI width)
+                if !all_errors.is_empty() {
+                    let mut stderr = io::stderr();
+                    println!();
+                    for (text, details) in all_errors {
+                        let _ = execute!(stderr, SetForegroundColor(Color::AnsiValue(160)));
+                        eprintln!("{}", text);
+                        if let Some(details) = details {
+                            eprintln!("{}", details);
                         }
-                    };
-                    element.print();
-
-                    // Print full error messages in red (not truncated by TUI width)
-                    if !all_errors.is_empty() {
-                        let mut stderr = io::stderr();
-                        println!();
-                        for (text, details) in all_errors {
-                            let _ = execute!(stderr, SetForegroundColor(Color::AnsiValue(160)));
-                            eprintln!("{}", text);
-                            if let Some(details) = details {
-                                eprintln!("{}", details);
-                            }
-                            let _ = execute!(stderr, ResetColor);
-                        }
+                        let _ = execute!(stderr, ResetColor);
                     }
                 }
             }
