@@ -282,6 +282,8 @@ pub enum ViewMode {
     /// Expanded log view for a specific activity (fullscreen, uses alternate screen)
     /// Note: scroll_offset is managed as component-local state for immediate responsiveness
     ExpandedLogs { activity_id: u64 },
+    /// TUI is paused after completion with errors - user can review before exiting
+    ErrorPaused,
 }
 
 impl ActivityModel {
@@ -1022,6 +1024,14 @@ impl ActivityModel {
             .iter()
             .filter(|msg| msg.level == ActivityLevel::Error)
             .collect()
+    }
+
+    /// Check if there are any error messages in the log.
+    /// Used to determine if the TUI should pause on completion.
+    pub fn has_errors(&self) -> bool {
+        self.message_log
+            .iter()
+            .any(|msg| msg.level == ActivityLevel::Error)
     }
 
     pub fn get_total_duration(&self) -> Option<std::time::Duration> {

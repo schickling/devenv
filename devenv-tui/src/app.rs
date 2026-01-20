@@ -183,14 +183,27 @@ impl TuiApp {
         // UiState is only modified by the UI thread.
         let ui_state = Arc::new(RwLock::new(UiState::new()));
 
+        // Track if we've entered error-paused mode
+        let mut error_paused = false;
+
         // Main loop - runs until shutdown (either Ctrl+C or event processor signals completion)
         loop {
             tokio::select! {
-                _ = shutdown.wait_for_shutdown() => {
-                    // Shutdown triggered - but we need to wait for event processor to finish draining
-                    // If this was Ctrl+C, event processor will see backend_done after backend cleanup
-                    // If this was normal completion, event processor already drained and called shutdown
-                    break;
+                _ = shutdown.wait_for_shutdown(), if !error_paused => {
+                    // Shutdown triggered - check if we should pause instead of exiting
+                    let has_errors = activity_model.read().map(|m| m.has_errors()).unwrap_or(false);
+                    let is_interrupt = shutdown.last_signal().is_some();
+
+                    if has_errors && !is_interrupt {
+                        // Errors occurred - enter paused mode instead of exiting
+                        error_paused = true;
+                        if let Ok(mut ui) = ui_state.write() {
+                            ui.view_mode = ViewMode::ErrorPaused;
+                        }
+                        // Continue the loop - don't break
+                    } else {
+                        break;
+                    }
                 }
 
                 _ = run_view(
@@ -325,11 +338,24 @@ fn MainView(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 && key_event.kind != KeyEventKind::Release
             {
                 debug!("Key event: {:?}", key_event);
+                // Check if we're in error-paused mode
+                let is_error_paused = ui_state
+                    .read()
+                    .map(|ui| ui.view_mode == ViewMode::ErrorPaused)
+                    .unwrap_or(false);
+
                 match key_event.code {
                     KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
                         // Set signal so Nix backend knows to interrupt operations
                         shutdown.set_last_signal(Signal::SIGINT);
                         shutdown.shutdown();
+                        if is_error_paused {
+                            should_exit.set(true);
+                        }
+                    }
+                    KeyCode::Char('q') | KeyCode::Enter if is_error_paused => {
+                        // Exit from error-paused mode
+                        should_exit.set(true);
                     }
                     KeyCode::Char('e') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
                         if let Ok(mut ui) = ui_state.write()
@@ -358,7 +384,10 @@ fn MainView(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         }
                     }
                     KeyCode::Esc => {
-                        if let Ok(mut ui) = ui_state.write() {
+                        if is_error_paused {
+                            // Exit from error-paused mode
+                            should_exit.set(true);
+                        } else if let Ok(mut ui) = ui_state.write() {
                             ui.selected_activity = None;
                         }
                     }
@@ -405,7 +434,7 @@ async fn run_view(
     };
 
     match view_mode {
-        ViewMode::Main => {
+        ViewMode::Main | ViewMode::ErrorPaused => {
             if *pre_expand_height > 0 {
                 let mut stdout = io::stdout();
                 let _ = execute!(
