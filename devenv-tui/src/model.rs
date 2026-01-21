@@ -814,10 +814,14 @@ impl ActivityModel {
     fn handle_message(&mut self, msg: Message) {
         self.add_log_message(msg.clone());
 
-        // Only create activity for messages with a parent
-        // Standalone errors are logged but not shown as activities - the failed build
-        // activities themselves will remain visible with their logs
-        if msg.parent.is_some() {
+        // Don't create activities for error/warning messages - they clutter the TUI
+        // and don't have useful logs to inspect. The actual build activities that failed
+        // will remain visible with their logs. Error messages are still logged and
+        // printed after TUI exit.
+        if msg.parent.is_some()
+            && msg.level != ActivityLevel::Error
+            && msg.level != ActivityLevel::Warn
+        {
             let id = msg.id;
             let level = msg.level;
             let has_details = msg.details.is_some();
@@ -1028,12 +1032,22 @@ impl ActivityModel {
             .collect()
     }
 
-    /// Check if there are any error messages in the log.
+    /// Check if there are any errors (messages or failed activities).
     /// Used to determine if the TUI should pause on completion.
     pub fn has_errors(&self) -> bool {
-        self.message_log
+        // Check for error messages in the log
+        let has_error_messages = self
+            .message_log
             .iter()
-            .any(|msg| msg.level == ActivityLevel::Error)
+            .any(|msg| msg.level == ActivityLevel::Error);
+
+        // Check for failed activities (builds, tasks, etc.)
+        let has_failed_activities = self
+            .activities
+            .values()
+            .any(|a| matches!(a.state, NixActivityState::Completed { success: false, .. }));
+
+        has_error_messages || has_failed_activities
     }
 
     pub fn get_total_duration(&self) -> Option<std::time::Duration> {
