@@ -3,7 +3,7 @@ use devenv_activity::{
     ActivityEvent, ActivityLevel, ActivityOutcome, Build, Command, Evaluate, ExpectedCategory,
     Fetch, FetchKind, Message, Operation, SetExpected, Task,
 };
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -42,6 +42,9 @@ pub struct ActivityModel {
     expected_builds: Option<u64>,
     /// Expected download count announced by Nix (via SetExpected events)
     expected_downloads: Option<u64>,
+    /// Activities that have received error messages from children
+    /// These should be marked as failed when they complete
+    activities_with_errors: HashSet<u64>,
 }
 
 impl Default for ActivityModel {
@@ -305,6 +308,7 @@ impl ActivityModel {
             config,
             expected_builds: None,
             expected_downloads: None,
+            activities_with_errors: HashSet::new(),
         }
     }
 
@@ -650,13 +654,17 @@ impl ActivityModel {
     }
 
     fn handle_activity_complete(&mut self, id: u64, outcome: ActivityOutcome) {
+        // Check if this activity received error messages from children
+        let has_error_children = self.activities_with_errors.remove(&id);
+
         // First, get the activity info we need
         let (variant, success, cached, duration) = {
             if let Some(activity) = self.activities.get(&id) {
+                // Mark as failed if outcome is failure OR if we received error messages
                 let success = matches!(
                     outcome,
                     ActivityOutcome::Success | ActivityOutcome::Cached | ActivityOutcome::Skipped
-                );
+                ) && !has_error_children;
                 let cached = matches!(outcome, ActivityOutcome::Cached);
                 let duration = activity.start_time.elapsed();
                 (activity.variant.clone(), success, cached, duration)
@@ -814,10 +822,43 @@ impl ActivityModel {
     fn handle_message(&mut self, msg: Message) {
         self.add_log_message(msg.clone());
 
+        // For error messages, try to find and mark the corresponding build activity as failed
+        if msg.level == ActivityLevel::Error {
+            // Track parent as having errors
+            if let Some(parent_id) = msg.parent {
+                self.activities_with_errors.insert(parent_id);
+            }
+
+            // Parse "Cannot build '/nix/store/...drv'" to find the specific build that failed
+            if let Some(drv_path) = Self::extract_derivation_path_from_error(&msg.text) {
+                // Find the build activity with this derivation path and mark it as failed
+                if let Some((id, _)) = self
+                    .activities
+                    .iter()
+                    .find(|(_, a)| a.detail.as_deref() == Some(drv_path.as_str()))
+                {
+                    let id = *id;
+                    self.activities_with_errors.insert(id);
+
+                    // If already completed, mark as failed now
+                    if let Some(activity) = self.activities.get_mut(&id)
+                        && let NixActivityState::Completed {
+                            cached, duration, ..
+                        } = activity.state
+                    {
+                        activity.state = NixActivityState::Completed {
+                            success: false,
+                            cached,
+                            duration,
+                        };
+                    }
+                }
+            }
+        }
+
         // Don't create activities for error/warning messages - they clutter the TUI
-        // and don't have useful logs to inspect. The actual build activities that failed
-        // will remain visible with their logs. Error messages are still logged and
-        // printed after TUI exit.
+        // and don't have useful logs to inspect. The parent activity is marked as failed
+        // when it completes, and error messages are still logged and printed after TUI exit.
         if msg.parent.is_some()
             && msg.level != ActivityLevel::Error
             && msg.level != ActivityLevel::Warn
@@ -863,6 +904,21 @@ impl ActivityModel {
         if self.message_log.len() > self.config.max_log_messages {
             self.message_log.pop_front();
         }
+    }
+
+    /// Extract derivation path from error messages like "Cannot build '/nix/store/...drv'"
+    fn extract_derivation_path_from_error(text: &str) -> Option<String> {
+        // Look for pattern: Cannot build '/nix/store/...drv'
+        if let Some(start) = text.find("Cannot build '") {
+            let rest = &text[start + 14..]; // len("Cannot build '") = 14
+            if let Some(end) = rest.find("'") {
+                let path = &rest[..end];
+                if path.starts_with("/nix/store/") && path.ends_with(".drv") {
+                    return Some(path.to_string());
+                }
+            }
+        }
+        None
     }
 
     pub fn get_active_activities(&self) -> Vec<&Activity> {
